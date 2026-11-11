@@ -1,5 +1,5 @@
 __all__ = ["__version__", "get_version", "__description__"]
-__version__ = "2.0.0.post1"
+__version__ = "2.0.0.post2"
 __description__ = "Fast MicroPython CLI with a separately packaged board-management agent."
 __author__ = "PlanX Lab Development Team"
 
