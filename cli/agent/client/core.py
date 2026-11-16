@@ -50,6 +50,7 @@ class AgentClient:
         self._atexit_registered = False
         self._release_on_exit = False
         self._version_checked = False
+        self._skip_version_check = False
         self._agent_info: Optional[dict] = None
         self._agent_info_time = 0.0
 
@@ -81,11 +82,36 @@ class AgentClient:
             self._agent_info = None
 
         if not self._version_checked:
-            self._check_agent_version(timeout)
+            if self._skip_version_check:
+                self._version_checked = True
+            else:
+                self._check_agent_version(timeout)
 
         if not self._atexit_registered and self.device_port:
             atexit.register(self._atexit_release)
             self._atexit_registered = True
+
+    @classmethod
+    def get_agent_version(
+        cls, port: int = None, host: str = None, timeout: float = None
+    ) -> str:
+        client = cls(port=port, host=host)
+        client._skip_version_check = True
+        with client:
+            info = client.send_command(
+                Cmd.PING,
+                timeout=cls.TIMEOUT if timeout is None else timeout,
+            )
+
+        if info.get("protocol_version") != 2:
+            raise RuntimeError(
+                f"Incompatible replx-agent protocol: {info.get('protocol_version')!r}"
+            )
+
+        agent_version = info.get("agent_version")
+        if not isinstance(agent_version, str) or not agent_version.strip():
+            raise RuntimeError("The configured agent did not report its version.")
+        return agent_version.strip()
 
     def _check_agent_version(self, timeout: float = None) -> None:
         endpoint = (self.host, self.agent_port)

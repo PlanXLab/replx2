@@ -116,6 +116,9 @@ Manage the replx agent service and client connections.
 [bold cyan]Usage:[/bold cyan]
   replx agent [yellow]SUBCOMMAND[/yellow] ...
 
+[bold cyan]Version:[/bold cyan]
+  replx agent --version
+
 [bold cyan]Subcommands:[/bold cyan]
   [green]status[/green]                 Show all client IP/SID sessions and assigned boards.
   [green]start[/green]                  Start or restart the agent on this computer.
@@ -179,8 +182,36 @@ agent_app = typer.Typer(
 @agent_app.callback()
 def agent_callback(
     ctx: typer.Context,
-    show_help: bool = typer.Option(False, "--help", "-h", is_eager=True, hidden=True)
+    show_help: bool = typer.Option(False, "--help", "-h", is_eager=True, hidden=True),
+    show_version: bool = typer.Option(
+        False,
+        "--version",
+        is_eager=True,
+        help="Show the configured replx-agent version and exit.",
+    ),
 ):
+    if show_version:
+        host = AgentPortManager._read_registered_ip(persist_config=False)
+        port = _get_current_agent_port()
+        try:
+            agent_version = AgentClient.get_agent_version(port=port, host=host)
+        except (OSError, RuntimeError, ValueError) as exc:
+            OutputHelper.print_panel(
+                f"Could not query replx-agent at [bright_blue]{host}:{port}[/bright_blue].\n\n"
+                f"[yellow]Error:[/yellow] {exc}",
+                title="Agent Version Unavailable",
+                border_style="error",
+            )
+            raise typer.Exit(1)
+
+        OutputHelper.print_panel(
+            f"[bright_blue]replx-agent[/bright_blue] version [bright_green]{agent_version}[/bright_green]\n"
+            f"[dim]Endpoint: {host}:{port}[/dim]",
+            title="Version",
+            border_style="success",
+        )
+        raise typer.Exit()
+
     if show_help or ctx.invoked_subcommand is None:
         _print_agent_help()
         raise typer.Exit()
