@@ -30,6 +30,8 @@ from ..connection import (
 )
 from ..app import app
 
+_FORMAT_TIMEOUT = 120.0
+
 
 def _port_sort_key(port: str) -> tuple:
     if port is None:
@@ -1460,8 +1462,8 @@ Format (erase) the filesystem on the connected device.
             
             try:
                 client = _create_agent_client()
-                result = client.send_command('format')
-                ret = result.get('formatted', True) if result else None
+                result = client.send_command('format', timeout=_FORMAT_TIMEOUT)
+                ret = result.get('formatted', False) if result else None
             except Exception as e:
                 error = e
             finally:
@@ -1598,8 +1600,8 @@ Completely reset device: format filesystem and install all libraries.
         with Live(make_format_panel("Formatting file system..."), 
                   console=console, refresh_per_second=10) as live:
             client = _create_agent_client()
-            result = client.send_command('format')
-            format_result = result.get('formatted', True) if result else None
+            result = client.send_command('format', timeout=_FORMAT_TIMEOUT)
+            format_result = result.get('formatted', False) if result else None
             
             if not format_result:
                 live.stop()

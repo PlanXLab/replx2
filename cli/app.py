@@ -15,6 +15,27 @@ from .config import STATE, _set_global_options, _find_env_file, _get_theme_confi
 
 import re
 
+
+_GLOBAL_OPTIONS_WITH_VALUE = {'--port', '-p'}
+
+
+def _find_first_command_argument(
+    argv: list[str],
+    options_with_value: set[str] = _GLOBAL_OPTIONS_WITH_VALUE,
+) -> tuple[Optional[int], Optional[str]]:
+    skip_next = False
+    for index, arg in enumerate(argv[1:], 1):
+        if skip_next:
+            skip_next = False
+            continue
+        if arg in options_with_value:
+            skip_next = True
+            continue
+        if not arg.startswith('-'):
+            return index, arg
+    return None, None
+
+
 def _preprocess_connection_shortcut():
     if len(sys.argv) < 2:
         return
@@ -35,25 +56,10 @@ def _preprocess_connection_shortcut():
     
     known_commands = commands_with_connection | commands_without_connection | {'connect'}
     
-    opts_with_value = {'--port', '-p'}
-    
-    first_arg_idx = None
-    skip_next = False
-    for i, arg in enumerate(sys.argv[1:], 1):
-        if skip_next:
-            skip_next = False
-            continue
-        if arg in opts_with_value:
-            skip_next = True
-            continue
-        if not arg.startswith('-'):
-            first_arg_idx = i
-            break
+    first_arg_idx, first_arg = _find_first_command_argument(sys.argv)
     
     if first_arg_idx is None:
         return
-    
-    first_arg = sys.argv[first_arg_idx]
     
     if first_arg.lower() in known_commands:
         return
@@ -594,21 +600,7 @@ def main():
 
     known = _get_known_commands()
 
-    opts_with_value = {'--port', '-p'}
-    
-    first_nonopt_idx = None
-    skip_next = False
-    for i, a in enumerate(sys.argv[1:], 1):
-        if skip_next:
-            skip_next = False
-            continue
-        if a in opts_with_value:
-            skip_next = True
-            continue
-        if not a.startswith('-'):
-            first_nonopt_idx = i
-            break
-    first_nonopt = sys.argv[first_nonopt_idx] if first_nonopt_idx is not None else None
+    first_nonopt_idx, first_nonopt = _find_first_command_argument(sys.argv)
 
     run_opts = {'-n', '--non-interactive', '-e', '--echo', '-d', '--device', '--line', '--hex', '--text'}
     has_device_opt = bool(run_opts & {'-d', '--device'} & set(args))
@@ -619,7 +611,7 @@ def main():
         if skip_next:
             skip_next = False
             continue
-        if a in opts_with_value:
+        if a in _GLOBAL_OPTIONS_WITH_VALUE:
             skip_next = True
             continue
         if a.endswith('.py') or (has_device_opt and a.endswith('.mpy')):
@@ -638,8 +630,7 @@ def main():
         insert_at = min(opt_idx, script_arg_idx) if opt_idx is not None else script_arg_idx
         sys.argv.insert(insert_at, 'run')
 
-        first_nonopt_idx = next((i for i, a in enumerate(sys.argv[1:], 1) if not a.startswith('-')), None)
-        first_nonopt = sys.argv[first_nonopt_idx] if first_nonopt_idx is not None else None
+        first_nonopt_idx, first_nonopt = _find_first_command_argument(sys.argv)
 
     _load_required_command_module(first_nonopt)
 

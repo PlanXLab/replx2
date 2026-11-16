@@ -23,7 +23,7 @@ from ..connection import (
     _ensure_connected, _create_agent_client
 )
 from ..app import app
-from replx.utils.device_info import normalize_core
+from replx.utils.device_info import normalize_core, normalize_version
 
 
 _MIP_INDEX_URL = "https://micropython.org/pi/v2"
@@ -299,18 +299,28 @@ def _collect_github_directory_files(
 def _get_mpy_abi_from_state() -> str:
     """Derive the mpy ABI version number from the connected board's firmware version.
 
-    Returns e.g. '6' for MicroPython 1.23+, or 'py' (source-only) if unknown.
+    Returns the ABI selected for the connected firmware, or 'py' when the
+    caller explicitly requested source installation or the version is unknown.
     """
     version = STATE.version
     if not version or version == "?":
         return "py"
+    if normalize_core(getattr(STATE, "core", "")) == "EFR32MG":
+        bytecode_version = CompilerHelper._xbee_compiler_profile(version)[1]
+        return str(bytecode_version)
     try:
-        parts = version.split(".")
-        major, minor = int(parts[0]), int(parts[1])
-        if (major, minor) >= (1, 23):
+        normalized = normalize_version(version)
+        major, minor, patch = (int(part) for part in normalized.split("."))
+        if (major, minor) >= (1, 19):
             return "6"
-        if (major, minor) >= (1, 20):
+        if (major, minor) >= (1, 12):
             return "5"
+        if (major, minor) == (1, 11):
+            return "4"
+        if (major, minor) == (1, 10):
+            return "3"
+        if (major, minor) == (1, 9):
+            return "3" if patch >= 3 else "2"
     except Exception:
         pass
     return "py"
@@ -423,7 +433,7 @@ def _collect_install_files(
     """Recursively collect (abs_local_path, dest_rel_path) for all package files.
 
     Processes both `hashes` (pre-compiled .mpy from CDN) and `urls` (.py source).
-    When mpy_abi is 'py', only `urls` are available (source-only path).
+    When mpy_abi is 'py', only `urls` are available for the source path.
     """
     if visited is None:
         visited = set()
@@ -962,15 +972,7 @@ def _mip_install_from_source(
 
 def _mip_install(args: list[str], device_path: str, index_url: str, no_compile: bool,
                  source_base: Optional[str] = None):
-    status = _ensure_connected()
-    if normalize_core(status.get('core', '')) == 'EFR32MG':
-        if not no_compile:
-            OutputHelper._console.print(
-                "[yellow]XBee3 legacy firmware: installing .py source only "
-                "(equivalent to --no-compile). Package API compatibility "
-                "must still be checked.[/yellow]"
-            )
-        no_compile = True
+    _ensure_connected()
 
     if source_base is not None:
         if not args:

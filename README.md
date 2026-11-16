@@ -19,7 +19,7 @@ Device features depend on the firmware APIs available on the connected board; se
 |---|---|
 | Raspberry Pi Pico 2 W (RP2350) | MicroPython 1.29 or newer |
 | Waveshare ESP32-P4-WIFI6 (P4 + C6) | Use firmware matching the P4 chip revision. Wi-Fi/BLE require a compatible C6 Wi-Fi build and ESP-Hosted firmware. |
-| Digi XBee3 Zigbee (EFR32MG) | Digi firmware 1014 or later with its vendor MicroPython runtime; use `.py` source rather than the bundled modern `mpy-cross` compiler. |
+| Digi XBee3 Zigbee (EFR32MG) | Digi firmware 1014 or later with its vendor MicroPython runtime; Python packages use a firmware-matched legacy `mpy-cross` profile and install `.mpy` files. |
 | PlanXLab TiCLE RP2350 variants | Profiles are included; firmware downloads are available for `ticle-lite` and `ticle-sensor`. |
 | Teensy 4.x (`MIMXRT1062DVJ6A`) | A software profile is included; supported features depend on the installed firmware. |
 
@@ -34,7 +34,10 @@ Device features depend on the firmware APIs available on the connected board; se
 ### Digi XBee3 Zigbee notes
 
 - Use XCTU to select MicroPython mode (`AP=4`) and set the REPL UART to 115200 baud. Zigbee transparent/API mode is not a Python REPL; `replx` does not change the module's AT settings.
-- The board filesystem root `/` maps to `/flash`. Use small `.py` programs; XBee's older vendor runtime may not support current MicroPython syntax or packages. `mip install` uses source mode, but package compatibility is still up to the package.
+- The board filesystem root `/` maps to `/flash`. Use small programs; XBee's older vendor runtime may not support current MicroPython syntax or packages. Package compatibility is still up to the package.
+- `pkg update core.all`, `pkg update device.all`, and `init` compile Python files for the connected firmware and install `.mpy` files, including on xnode. `mip install --no-compile` remains available for intentional source uploads.
+- XBee3 firmware versions are mapped to compatible compiler profiles: 1.22–1.23 use their matching profiles, 1.20–1.21 use the 1.20 profile, 1.12–1.19 use the nearest supported legacy compiler, and 1.9–1.11 use the corresponding older profile. Firmware older than 1.9 is rejected rather than receiving an incompatible `.mpy`.
+- `format` and the formatting step of `init` allow up to 120 seconds for the agent response. Back up files first: both erase the filesystem. `df` queries the `/flash` mount rather than the virtual `/` root.
 - Use Digi pin names. `gpio` supports level read/write and sequences; `adc` supports D0-D3 and reports native counts; I2C controller mode uses bus 1 with SDA=P1 and SCL=D1.
 - `mpy`, PWM, SPI, secondary UART, I2S, WS2812, Wi-Fi, and replx BLE commands are not supported for XBee3. Vendor-specific radio features may still be available through Digi APIs in your own scripts.
 
@@ -637,6 +640,8 @@ Options:
 #### `format`
 Completely wipe the board filesystem and start fresh. All user files including `boot.py`, `main.py`, and `lib/` are deleted. Some boards may not support the format command — check the error message if it fails.
 
+The client waits up to 120 seconds for the format response, including when formatting during `init`. Device-side failures are reported with their original error details.
+
 Usage:
 ```sh
 replx format
@@ -725,7 +730,7 @@ replx firmware update --flash-port COM3 --file "D:\firmware\board.bin" --baud 11
 ### Package / Compile
 
 #### `mip`
-Install MicroPython packages from the official micropython.org index or directly from GitHub. All downloading and compilation happen on the PC — the board does not need a Wi-Fi connection. On standard runtimes, `.py` source files are compiled to `.mpy` using `mpy-cross` before upload. The target architecture is auto-detected from the connected board via `sys.implementation._mpy`. On Digi XBee3, installation automatically uses source mode and skips modern `.mpy` compilation; package compatibility with the vendor runtime is still the user's responsibility.
+Install MicroPython packages from the official micropython.org index or directly from GitHub. All downloading and compilation happen on the PC — the board does not need a Wi-Fi connection. On standard runtimes, `.py` source files are compiled to `.mpy` using `mpy-cross` before upload. The target architecture is auto-detected from the connected board via `sys.implementation._mpy`. On Digi XBee3, Python sources are compiled with the firmware-matched legacy `mpy-cross --compat` profile; package compatibility with the vendor runtime is still the user's responsibility.
 
 For packages in the official index, pre-compiled `.mpy` files are fetched directly from the CDN when available (`hashes` field). For `github:org/repo` specs without a `package.json`, replx automatically queries the board's architecture and fetches pre-built `.mpy` binaries from the repository's GitHub Pages CDN (e.g. `emlearn-micropython`).
 
@@ -775,7 +780,7 @@ replx mip install --source https://host/path/ a.mpy b.mpy
 
 Notes:
 - All network I/O happens on the PC — board WiFi is **not** required.
-- On standard runtimes, `.py` files are compiled to `.mpy` before upload (requires `mpy-cross`); XBee3 automatically uses source mode.
+- On standard runtimes, `.py` files are compiled to `.mpy` before upload (requires `mpy-cross`). XBee3 selects a compatible legacy compiler profile automatically; use `--no-compile` only for intentional source uploads.
 - Dependencies declared in `deps` are installed automatically.
 - For packages without `package.json` (e.g. native C modules), replx reads the board's `sys.implementation._mpy` to determine architecture (`armv6m`, `armv7emsp`, `xtensawin`, etc.) and fetches matching pre-built `.mpy` files from GitHub Pages.
 
@@ -805,10 +810,12 @@ replx pkg clean
 
 > Note: `pkg search/download/update` operates within the **core/device scope of the currently connected board**.
 
+On Digi XBee3/EFR32MG (including xnode), Python files are compiled with the firmware-matched legacy compiler and installed as `.mpy`; progress is shown as "Compiling". Other supported cores retain their existing `.mpy` compilation. This also applies to package installation performed by `init`; compiled installation does not guarantee that a package supports Digi's vendor APIs.
+
 #### `mpy`
 Compile `.py` files to `.mpy` bytecode. Automatically selects the target architecture based on the connected board's `core` and version. `-o/--output` can only be used when compiling a single file. `mpy-cross` 1.29 or newer must be installed locally before use; `pip install replx` installs it automatically.
 
-The bundled compiler is not used for Digi XBee3's legacy/vendor `.mpy` ABI. Use `put` for `.py` source or `mip install --no-compile` instead.
+For Digi XBee3, `mpy` selects the compatible legacy compiler profile from the connected firmware version and validates the output header. Use `put` for `.py` source or `mip install --no-compile` only when source installation is intentional.
 
 Usage:
 ```sh
@@ -1266,7 +1273,7 @@ Notes:
 | `mip install` — package not found | Typo or unofficial package | Try `replx mip search NAME` to confirm exact name |
 | `mip install github:org/repo` — 404 | Repo has no `package.json` | replx falls back to GitHub Pages CDN; if no CDN files exist for your arch, the package does not support your board |
 | `mip install` — arch not supported | Board arch not in package's prebuilt list | Check the repo for supported architectures; use `replx -c "import sys; print(sys.implementation._mpy)"` to confirm |
-| `mip install` — compile error | `mpy-cross` missing or older than the target runtime | `python -m pip install --upgrade "mpy-cross>=1.29.0"`, or use `--no-compile` to skip compilation |
+| `mip install` — compile error | `mpy-cross` missing, no compatible XBee firmware profile, or invalid `.mpy` ABI | `python -m pip install --upgrade "mpy-cross>=1.29.0"`; verify the XBee firmware version, or use `--no-compile` to skip compilation |
 | No `pkg search` results | Outside current board's core/device scope | Check board with `whoami`, switch board and search again |
 | `pkg update` fails | Local store not prepared | Run `replx pkg download` first, then retry `replx pkg update ...` |
 | `mpy` fails | `mpy-cross` missing or outdated | `python -m pip install --upgrade "mpy-cross>=1.29.0"` |
@@ -1289,7 +1296,7 @@ Notes:
 | `uart write`/`read` says the UART was opened RX-only/TX-only | The missing direction was not given to `open` | Re-open with both `--tx` and `--rx` |
 | ESP32 `uart open --id 0` rejected | UART0 carries the REPL | Use `--id 1` (default) or another free UART |
 | XBee3 hardware command excluded | The standard API is unavailable or this CLI feature is not implemented for Digi's legacy runtime | Use named-pin GPIO, native ADC read, or fixed-bus I2C controller commands; consult the hardware platform table |
-| XBee3 compile/ABI error | Modern `mpy-cross` output is not certified for Digi's legacy/vendor ABI | Upload `.py` with `put`; `mip install` uses source mode automatically |
+| XBee3 compile/ABI error | Firmware version is unknown/too old, or the selected compatibility compiler cannot produce the expected header | Check the connected firmware version and installed `mpy-cross`; use `--no-compile` only for an intentional source upload |
 | P4 Wi-Fi/BLE API unavailable | Standalone P4 firmware or mismatched C6 configuration | Use a board-compatible C6 Wi-Fi/BLE build and matching coprocessor firmware |
 | P4 BLE unavailable or crashes | Incompatible C6 firmware or a MicroPython image without working BLE support | Use matching C6 ESP-Hosted and P4 `C6_WIFI` firmware; check that the image supports `bluetooth.BLE` |
 | P4 native USB port missing | Wrong connector/cable or firmware without native USB CDC | Use the separate 4-pin V/D-/D+/G connector and check the [P4 notes](#waveshare-esp32-p4-wifi6-notes) |

@@ -107,7 +107,7 @@ Package management for MicroPython devices.
 [bold cyan]Subcommands:[/bold cyan]
   [yellow]search[/yellow] [dim][QUERY][/dim]          Search available libraries. [dim]QUERY[/dim] filters results by module name
   [yellow]download[/yellow]                Download to local store
-  [yellow]update[/yellow] [green]TARGET[/green] [dim][OPTION][/dim]  Install to device (.py → .mpy)
+  [yellow]update[/yellow] [green]TARGET[/green] [dim][OPTION][/dim]  Install to device (.py to .mpy)
   [yellow]clean[/yellow]                   Remove current core/device from local store
 
 [bold cyan]Update Targets:[/bold cyan]
@@ -393,13 +393,14 @@ def _install_spec_internal(spec: str, live=None, update_callback=None):
         if not isinstance(data, dict):
             return
         phase = data.get("phase")
-        if phase == "compile":
+        if phase in ("compile", "prepare"):
             cur = data.get("current", 0)
             tot = data.get("total", 0) or 1
+            action = "Preparing source" if phase == "prepare" else "Compiling"
             render(OutputHelper.create_progress_panel(
                 cur, tot,
-                title="Compiling",
-                message=f"Compiling {data.get('file', '')} ({min(cur + 1, tot)}/{tot})",
+                title=action,
+                message=f"{action} {data.get('file', '')} ({min(cur + 1, tot)}/{tot})",
                 counter_text=f"({cur}/{tot})",
             ))
         elif phase == "install":
