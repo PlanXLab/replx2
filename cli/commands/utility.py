@@ -12,6 +12,7 @@ from rich.live import Live
 from rich.spinner import Spinner
 
 from replx import __version__
+from replx_agent import __version__ as AGENT_VERSION
 from replx.utils.constants import AGENT_BIND_ALL_HOST, AGENT_HOST, DEFAULT_AGENT_PORT
 from replx.terminal import IS_WINDOWS
 from ..agent.client import AgentClient, get_cached_session_id
@@ -187,7 +188,10 @@ def agent_callback(
         False,
         "--version",
         is_eager=True,
-        help="Show the configured replx-agent version and exit.",
+        help=(
+            "Show the configured agent version, or local package version "
+            "if its local endpoint is stopped."
+        ),
     ),
 ):
     if show_version:
@@ -195,22 +199,35 @@ def agent_callback(
         port = _get_current_agent_port()
         try:
             agent_version = AgentClient.get_agent_version(port=port, host=host)
+        except ConnectionRefusedError as exc:
+            if AgentPortManager._is_local_ip(host):
+                OutputHelper.print_panel(
+                    f"[bright_blue]replx-agent[/bright_blue] package version "
+                    f"[bright_green]{AGENT_VERSION}[/bright_green]\n"
+                    f"[dim]No running agent at {host}:{port}; showing the local package version.[/dim]",
+                    title="Local Agent Version",
+                    border_style="success",
+                )
+                raise typer.Exit()
+            error = exc
         except (OSError, RuntimeError, ValueError) as exc:
+            error = exc
+        else:
             OutputHelper.print_panel(
-                f"Could not query replx-agent at [bright_blue]{host}:{port}[/bright_blue].\n\n"
-                f"[yellow]Error:[/yellow] {exc}",
-                title="Agent Version Unavailable",
-                border_style="error",
+                f"[bright_blue]replx-agent[/bright_blue] version [bright_green]{agent_version}[/bright_green]\n"
+                f"[dim]Endpoint: {host}:{port}[/dim]",
+                title="Version",
+                border_style="success",
             )
-            raise typer.Exit(1)
+            raise typer.Exit()
 
         OutputHelper.print_panel(
-            f"[bright_blue]replx-agent[/bright_blue] version [bright_green]{agent_version}[/bright_green]\n"
-            f"[dim]Endpoint: {host}:{port}[/dim]",
-            title="Version",
-            border_style="success",
+            f"Could not query replx-agent at [bright_blue]{host}:{port}[/bright_blue].\n\n"
+            f"[yellow]Error:[/yellow] {error}",
+            title="Agent Version Unavailable",
+            border_style="error",
         )
-        raise typer.Exit()
+        raise typer.Exit(1)
 
     if show_help or ctx.invoked_subcommand is None:
         _print_agent_help()
