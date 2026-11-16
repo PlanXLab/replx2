@@ -437,14 +437,25 @@ Run this once per project folder to set up your workspace.
         raise typer.Exit(1)
     
     env_path = _find_env_file()
-    agent_port = _find_available_agent_port(env_path)
-    
-    if AgentClient.is_agent_running(port=agent_port):
+    # V2 uses the configured TCP endpoint directly. If it is unavailable,
+    # start_agent below performs the only required availability check.
+    agent_port = _find_available_agent_port(env_path, probe=False)
+
+    client = None
+    try:
+        client = AgentClient(port=agent_port, device_port=port)
+        agent_running = client.ping(timeout=0.2)
+    except (OSError, RuntimeError, ValueError):
+        if client is not None:
+            client.disconnect()
+        client = None
+        agent_running = False
+
+    if agent_running:
         try:
             # Pass device_port=port so _cmd_status checks the specific port being
             # set up, not the session's current foreground connection.
-            with AgentClient(port=agent_port, device_port=port) as client:
-                status = client.send_command('status', timeout=1.0)
+            status = client.send_command('status', timeout=1.0)
             
             if status.get('connected'):
                 current_port = status.get('port', '')
@@ -475,8 +486,9 @@ Run this once per project folder to set up your workspace.
 
                     default_sync_warning = None
                     try:
-                        with AgentClient(port=agent_port) as client:
-                            result = client.send_command('set_default', port=port, update_session=True, timeout=1.0)
+                        result = client.send_command(
+                            'set_default', port=port, update_session=True, timeout=1.0
+                        )
                         if result and not result.get('set'):
                             default_sync_warning = "Agent did not confirm the default session update."
                         elif result is None:
@@ -514,14 +526,13 @@ Run this once per project folder to set up your workspace.
                     raise typer.Exit()
                 else:
                     try:
-                        with AgentClient(port=agent_port, device_port=port) as client:
-                            result = client.send_command(
-                                'session_setup',
-                                as_foreground=True,
-                                set_default=True, 
-                                local_default=port,
-                                timeout=10.0
-                            )
+                        result = client.send_command(
+                            'session_setup',
+                            as_foreground=True,
+                            set_default=True,
+                            local_default=port,
+                            timeout=10.0
+                        )
                         
                         STATE.core = result.get('core', '')
                         STATE.device = result.get('device', 'unknown')
@@ -571,8 +582,13 @@ Run this once per project folder to set up your workspace.
             raise
         except Exception:
             pass
-    
-    if not AgentClient.is_agent_running(port=agent_port):
+        finally:
+            client.disconnect()
+
+    if not agent_running:
+        # Only the recovery path scans for an agent on a newly selected port.
+        # The normal configured-endpoint path above remains a single probe.
+        agent_port = _find_available_agent_port(env_path, probe=True)
         try:
             AgentClient.start_agent(port=agent_port)
         except Exception as e:

@@ -201,17 +201,19 @@ def agent_status(
     except RuntimeError as exc:
         OutputHelper.print_panel(str(exc), title="Agent Authentication Required", border_style="error")
         raise typer.Exit(1)
-    if not AgentClient.is_agent_running(port=port, host=host):
-        OutputHelper.print_panel(
-            f"No responsive agent at [bright_blue]{host}:{port}[/bright_blue].",
-            title="Agent Status",
-            border_style="neutral"
-        )
-        raise typer.Exit()
 
+    client = AgentClient(port=port, host=host)
     try:
-        with AgentClient(port=port, host=host) as client:
-            info = client.send_command('session_info', timeout=1.5)
+        if not client.ping():
+            OutputHelper.print_panel(
+                f"No responsive agent at [bright_blue]{host}:{port}[/bright_blue].",
+                title="Agent Status",
+                border_style="neutral"
+            )
+            raise typer.Exit()
+        info = client.send_command('session_info', timeout=1.5)
+    except typer.Exit:
+        raise
     except Exception as exc:
         OutputHelper.print_panel(
             f"Could not query agent at {host}:{port}: {exc}",
@@ -219,6 +221,8 @@ def agent_status(
             border_style="error"
         )
         raise typer.Exit(1)
+    finally:
+        client.disconnect()
 
     connection_by_port = {
         connection.get('port'): connection
@@ -331,7 +335,11 @@ def agent_start(
             continue
         probe_host = AgentClient._probe_host(endpoint_host)
         if AgentClient.is_agent_running(port=endpoint_port, host=probe_host):
-            if not AgentClient.stop_agent(port=endpoint_port, host=probe_host):
+            if not AgentClient.stop_agent(
+                port=endpoint_port,
+                host=probe_host,
+                _skip_probe=True,
+            ):
                 OutputHelper.print_panel(
                     f"Could not stop the running agent at {probe_host}:{endpoint_port}.",
                     title="Agent Start Failed",
@@ -340,7 +348,11 @@ def agent_start(
                 raise typer.Exit(1)
 
     try:
-        started = AgentClient.start_agent(port=selected_port, host=selected_host)
+        started = AgentClient.start_agent(
+            port=selected_port,
+            host=selected_host,
+            _skip_probe=True,
+        )
         AgentPortManager._write_registered_ip(AgentClient._probe_host(selected_host))
         AgentPortManager._write_registered_port(selected_port)
         AgentPortManager._singleton_cache = selected_port
@@ -484,10 +496,7 @@ app.add_typer(agent_app, name="agent")
 
 
 def _get_session_list_data(*, include_connections_without_sessions: bool = False):
-    env_path = _find_env_file()
-    running_agent_ports = _find_running_agent_ports(env_path)
-    if not running_agent_ports:
-        return None, None, "no_server"
+    running_agent_ports = [_get_current_agent_port()]
 
     current_ppid = get_cached_session_id()
     session_map = {}
@@ -607,6 +616,22 @@ def _get_session_list_data(*, include_connections_without_sessions: bool = False
     has_unassigned_connections = include_connections_without_sessions and bool(connections)
 
     if not session_map and query_errors and not has_unassigned_connections:
+        if all(
+            any(
+                marker in error.lower()
+                for marker in (
+                    "connection refused",
+                    "actively refused",
+                    "timed out",
+                    "timeout",
+                    "failed to connect",
+                    "cannot connect",
+                    "connection reset",
+                )
+            )
+            for error in query_errors
+        ):
+            return None, current_ppid, "no_server"
         return None, current_ppid, f"query_failed:{'; '.join(query_errors)}"
 
     sessions = []
@@ -1336,11 +1361,17 @@ def _stop_agent():
         failed_ports = []
 
         for agent_port in agent_ports:
-            was_running = AgentClient.is_agent_running(port=agent_port, host=agent_host)
-            stopped = AgentClient.stop_agent(port=agent_port, host=agent_host) if was_running else False
+            stopped = AgentClient.stop_agent(
+                port=agent_port,
+                host=agent_host,
+                _skip_probe=True,
+            )
 
             if stopped:
                 stopped_ports.append(agent_port)
+                continue
+
+            if not AgentClient.is_agent_running(port=agent_port, host=agent_host):
                 continue
 
             killed = (
@@ -1350,7 +1381,7 @@ def _stop_agent():
             )
             if killed:
                 killed_ports.append(agent_port)
-            elif was_running:
+            else:
                 failed_ports.append(agent_port)
 
         if stopped_ports or killed_ports:
@@ -1617,7 +1648,7 @@ Completely reset device: format filesystem and install all libraries.
             global_opts = _get_global_options()
             explicit_port = global_opts.get('port')
             
-            conn = _resolve_connection(explicit_port)
+            conn = _resolve_connection(explicit_port, agent_port=client.agent_port)
             if not conn:
                 raise RuntimeError("No connection configuration found")
             

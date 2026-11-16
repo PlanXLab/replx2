@@ -842,8 +842,15 @@ class AgentPortManager:
         return ports
     
     @staticmethod
-    def find_available_port(env_path: str = None) -> int:
+    def find_available_port(
+        env_path: str = None,
+        *,
+        probe: bool = True,
+    ) -> int:
         registered_port = AgentPortManager._read_registered_port()
+        if not probe:
+            return registered_port or DEFAULT_AGENT_PORT
+
         running_port = AgentPortManager._ensure_singleton_running_agent(preferred_port=registered_port)
         if running_port is not None:
             return running_port
@@ -924,11 +931,19 @@ class AgentPortManager:
 class ConnectionResolver:
     
     @staticmethod
-    def resolve(global_port: str = None) -> Optional[dict]:
+    def resolve(
+        global_port: str = None,
+        *,
+        agent_port: Optional[int] = None,
+    ) -> Optional[dict]:
         env_path = ConfigManager.find_env_file()
         
         if global_port:
-            return ConnectionResolver._resolve_serial(global_port, env_path)
+            return ConnectionResolver._resolve_serial(
+                global_port,
+                env_path,
+                agent_port=agent_port,
+            )
 
         result = ConnectionResolver._resolve_from_session(env_path)
         if result:
@@ -937,12 +952,21 @@ class ConnectionResolver:
         return ConnectionResolver._resolve_from_default(env_path)
     
     @staticmethod
-    def _resolve_serial(port: str, env_path: str) -> dict:
+    def _resolve_serial(
+        port: str,
+        env_path: str,
+        *,
+        agent_port: Optional[int] = None,
+    ) -> dict:
         conn_key = port
         result = {
             'connection': port,
             'source': 'global',
-            'agent_port': AgentPortManager.find_available_port(env_path),
+            'agent_port': (
+                agent_port
+                if agent_port is not None
+                else AgentPortManager.find_available_port(env_path)
+            ),
         }
         
         if env_path:
@@ -1035,8 +1059,8 @@ def _get_theme_config(env_path: str | None = None) -> str:
 def _set_theme_config(env_path: str | None, theme: str, theme_mode: str | None = None):
     return ConfigManager.set_theme(env_path, theme, theme_mode)
 
-def _find_available_agent_port(env_path: str) -> int:
-    return AgentPortManager.find_available_port(env_path)
+def _find_available_agent_port(env_path: str, *, probe: bool = True) -> int:
+    return AgentPortManager.find_available_port(env_path, probe=probe)
 
 def _resolve_agent_port() -> int:
     return AgentPortManager.find_available_port()
@@ -1070,8 +1094,12 @@ def _find_agent_for_connection(
         client=client,
     )
 
-def _resolve_connection(global_port: str = None) -> Optional[dict]:
-    return ConnectionResolver.resolve(global_port)
+def _resolve_connection(
+    global_port: str = None,
+    *,
+    agent_port: Optional[int] = None,
+) -> Optional[dict]:
+    return ConnectionResolver.resolve(global_port, agent_port=agent_port)
 
 def _set_global_options(port: str = None):
     GLOBAL_OPTIONS.set(port)

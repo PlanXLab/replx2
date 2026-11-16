@@ -1335,6 +1335,7 @@ class AgentClient:
         background: bool = True,
         host: str = None,
         _force: bool = False,
+        _skip_probe: bool = False,
     ) -> bool:
         from ...config import AgentPortManager
 
@@ -1354,7 +1355,11 @@ class AgentClient:
         if not AgentPortManager._is_local_ip(agent_host):
             raise ValueError(f"Cannot start an agent on non-local IP {agent_host}.")
         probe_host = AgentClient._probe_host(agent_host)
-        if not _force and AgentClient.is_agent_running(port=agent_port, host=probe_host):
+        if (
+            not _force
+            and not _skip_probe
+            and AgentClient.is_agent_running(port=agent_port, host=probe_host)
+        ):
             return False
 
         python_exe = sys.executable
@@ -1435,18 +1440,41 @@ class AgentClient:
         raise RuntimeError("Failed to start agent (timeout)")
 
     @staticmethod
-    def stop_agent(port: int = None, timeout: float = 0.7, host: str = None) -> bool:
-        if not AgentClient.is_agent_running(port=port, timeout=0.1, host=host):
-            return False
-        try:
-            with AgentClient(port=port, host=host) as client:
-                client.send_command(Cmd.SHUTDOWN, timeout=0.5)
-        except (OSError, RuntimeError, ValueError):
-            pass
+    def stop_agent(
+        port: int = None,
+        timeout: float = 0.7,
+        host: str = None,
+        _skip_probe: bool = False,
+    ) -> bool:
+        from ...config import AgentPortManager
 
+        agent_host = host or AgentPortManager._read_registered_ip() or AGENT_HOST
+        probe_host = AgentClient._probe_host(agent_host)
+        try:
+            with AgentClient(port=port, host=agent_host) as client:
+                probe_host = AgentClient._probe_host(client.host)
+                if not _skip_probe and not client.ping(timeout=0.1):
+                    return False
+                try:
+                    client.send_command(Cmd.SHUTDOWN, timeout=0.5)
+                except (OSError, RuntimeError, ValueError):
+                    pass
+        except (OSError, RuntimeError, ValueError):
+            if not _skip_probe:
+                return False
+
+        agent_port = port or DEFAULT_AGENT_PORT
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             time.sleep(0.05)
-            if not AgentClient.is_agent_running(port=port, timeout=0.05, host=host):
+            if not AgentClient._is_tcp_port_open(
+                agent_port,
+                timeout=0.05,
+                host=probe_host,
+            ):
                 return True
-        return not AgentClient.is_agent_running(port=port, timeout=0.05, host=host)
+        return not AgentClient._is_tcp_port_open(
+            agent_port,
+            timeout=0.05,
+            host=probe_host,
+        )

@@ -12,11 +12,43 @@ from .config import (
     _find_env_file, _find_or_create_vscode_dir,
     _find_available_agent_port,
     _update_connection_config, _get_default_connection,
-    _find_agent_for_connection,
     _resolve_connection,
     _get_global_options,
     AgentPortManager,
 )
+
+_pending_client: Optional[AgentClient] = None
+_pending_client_lock = threading.Lock()
+
+
+def _take_pending_client(
+    agent_port: int,
+    device_port: Optional[str],
+) -> Optional[AgentClient]:
+    global _pending_client
+    with _pending_client_lock:
+        pending = _pending_client
+        _pending_client = None
+
+    if pending is None:
+        return None
+    if pending.agent_port != agent_port or pending.device_port != device_port:
+        pending.disconnect()
+        return None
+    return pending
+
+
+def _store_pending_client(client: AgentClient, reusable: bool) -> None:
+    if not reusable:
+        return
+
+    global _pending_client
+    with _pending_client_lock:
+        previous = _pending_client
+        _pending_client = client
+    if previous is not None and previous is not client:
+        previous.disconnect()
+
 
 def _print_connect_info(
     port: str,
@@ -86,44 +118,61 @@ def _ensure_connected(
     ctx: typer.Context = None,
     client: Optional[AgentClient] = None,
 ) -> dict:
+    reusable_client = client is None
     global_opts = _get_global_options()
     explicit_port = global_opts.get('port')
 
     env_path = _find_env_file()
     default_conn = _get_default_connection(env_path) if env_path else None
 
-    agent_port = _find_available_agent_port(env_path)
+    # V2 has one configured TCP endpoint. Port discovery is still useful for
+    # lifecycle commands, but normal device commands should not scan local
+    # processes or ping candidate ports before opening their real connection.
+    agent_port = _find_available_agent_port(env_path, probe=False)
 
     global _cached_agent_port
     with _agent_port_cache_lock:
-        if _cached_agent_port is None:
-            _cached_agent_port = agent_port
+        _cached_agent_port = agent_port
 
-    if client is not None and client.agent_port != agent_port:
-        client.disconnect()
-        client.agent_port = agent_port
+    try:
+        if client is None:
+            client = _take_pending_client(agent_port, explicit_port)
+            if client is None:
+                client = AgentClient(port=agent_port, device_port=explicit_port)
+        elif client.agent_port != agent_port:
+            client.disconnect()
+            client.agent_port = agent_port
 
-    target_port = explicit_port or default_conn
-    if target_port:
-        running_agent_port = _find_agent_for_connection(
-            target_port,
-            env_path,
-            preferred_port=agent_port,
-            client=client,
-        )
-        if running_agent_port is not None:
-            agent_port = running_agent_port
+        agent_running = client.ping()
+    except (OSError, RuntimeError, ValueError):
+        if reusable_client and client is not None:
+            client.disconnect()
+        client = None
+        agent_running = False
+
+    if not agent_running:
+        # Keep the configured endpoint as the fast path, but retain recovery
+        # for agents started on a newly selected local port.
+        AgentPortManager._singleton_cache = None
+        AgentPortManager._singleton_cache_miss = False
+        discovered_agent_port = _find_available_agent_port(env_path, probe=True)
+        if discovered_agent_port != agent_port:
+            agent_port = discovered_agent_port
             with _agent_port_cache_lock:
                 _cached_agent_port = agent_port
-            if client is not None and client.agent_port != agent_port:
+            if client is not None:
                 client.disconnect()
                 client.agent_port = agent_port
-    
-    agent_running = (
-        client.ping()
-        if client is not None
-        else AgentClient.is_agent_running(port=agent_port)
-    )
+            try:
+                if client is None:
+                    client = AgentClient(port=agent_port, device_port=explicit_port)
+                agent_running = client.ping()
+            except (OSError, RuntimeError, ValueError):
+                if reusable_client and client is not None:
+                    client.disconnect()
+                client = None
+                agent_running = False
+
     if not agent_running:
         if client is not None:
             client.disconnect()
@@ -141,9 +190,9 @@ def _ensure_connected(
                 )
                 raise typer.Exit(1)
             
-            conn = _resolve_connection(default_conn)
+            conn = _resolve_connection(default_conn, agent_port=agent_port)
         else:
-            conn = _resolve_connection(explicit_port)
+            conn = _resolve_connection(explicit_port, agent_port=agent_port)
         
         if not conn:
             OutputHelper.print_panel(
@@ -155,30 +204,29 @@ def _ensure_connected(
             raise typer.Exit(1)
         
         try:
-            AgentClient.start_agent(port=agent_port)
+            AgentClient.start_agent(port=agent_port, _skip_probe=True)
             AgentPortManager._singleton_cache = agent_port
             AgentPortManager._singleton_cache_miss = False
+            if client is None:
+                client = AgentClient(port=agent_port, device_port=explicit_port)
 
             if default_conn:
-                with AgentClient(port=agent_port) as client:
-                    client.send_command('set_default', port=default_conn, timeout=1.0)
+                client.send_command('set_default', port=default_conn, timeout=1.0)
         except Exception as e:
             OutputHelper.print_panel(f"Failed to start agent: {str(e)}", title="Agent Error", title_align="left", border_style="error")
             raise typer.Exit(1)
         
         try:
             port_arg = conn['connection']
-            
-            with AgentClient(port=agent_port) as client:
-                result = client.send_command(
-                    'session_setup',
-                    port=port_arg,
-                    core=conn.get('core') or "RP2350",
-                    device=conn.get('device'),
-                    as_foreground=True,
-                    set_default=False,
-                    local_default=default_conn,
-                )
+            result = client.send_command(
+                'session_setup',
+                port=port_arg,
+                core=conn.get('core') or "RP2350",
+                device=conn.get('device'),
+                as_foreground=True,
+                set_default=False,
+                local_default=default_conn,
+            )
             
             if result.get('switched_from'):
                 OutputHelper.print_panel(
@@ -204,6 +252,8 @@ def _ensure_connected(
             
         except Exception as e:
             _handle_connection_error(e, port=port_arg, stop_agent=True, agent_port=agent_port)
+            if reusable_client:
+                client.disconnect()
             raise typer.Exit(1)
         
         if conn['source'] == 'global':
@@ -222,18 +272,29 @@ def _ensure_connected(
         
         set_global_context(STATE.core, STATE.device, STATE.version, STATE.device_root_fs, STATE.device_path)
         
-        with AgentClient(port=agent_port, device_port=explicit_port) as client:
-            status = client.send_command('status')
+        status = result
+        _store_pending_client(client, reusable_client)
         return status
     
     try:
-        if client is None:
-            with AgentClient(port=agent_port) as status_client:
-                status = status_client.send_command('status')
-                session_info = status_client.send_command('session_info', timeout=1.0)
-        else:
-            status = client.send_command('status')
-            session_info = client.send_command('session_info', timeout=1.0)
+        context_args = {'port': explicit_port} if explicit_port else {}
+        session_info = client.send_command(
+            'session_info',
+            timeout=2.0,
+            **context_args,
+        )
+        if not isinstance(session_info, dict):
+            raise RuntimeError("Agent returned an invalid session_info response")
+
+        status = session_info.pop('status', None)
+        if status is None:
+            status = client.send_command(
+                'status',
+                timeout=2.0,
+                **context_args,
+            )
+        if not isinstance(status, dict):
+            raise RuntimeError("Agent returned an invalid status response")
 
         def _port_norm(p: Optional[str]) -> str:
             if not p:
@@ -270,7 +331,7 @@ def _ensure_connected(
                     )
                     raise typer.Exit(1)
                 
-                fg_conn = _resolve_connection(default_conn)
+                fg_conn = _resolve_connection(default_conn, agent_port=agent_port)
                 if not fg_conn:
                     OutputHelper.print_panel(
                         "No connection available.\n\n"
@@ -282,16 +343,15 @@ def _ensure_connected(
                 
                 port_arg = fg_conn['connection']
                 
-                with AgentClient(port=agent_port) as client:
-                    result = client.send_command(
-                        'session_setup',
-                        port=port_arg,
-                        core=fg_conn.get('core') or "RP2350",
-                        device=fg_conn.get('device'),
-                        as_foreground=True,
-                        set_default=False,
-                        local_default=default_conn,
-                    )
+                result = client.send_command(
+                    'session_setup',
+                    port=port_arg,
+                    core=fg_conn.get('core') or "RP2350",
+                    device=fg_conn.get('device'),
+                    as_foreground=True,
+                    set_default=False,
+                    local_default=default_conn,
+                )
                 
                 if result.get('switched_from'):
                     OutputHelper.print_panel(
@@ -313,7 +373,7 @@ def _ensure_connected(
                 status['connected'] = True
                 current_fg = fg_conn['connection']
             else:
-                fg_conn = _resolve_connection(explicit_port)
+                fg_conn = _resolve_connection(explicit_port, agent_port=agent_port)
                 if not fg_conn:
                     OutputHelper.print_panel(
                         "No connection configuration found.\n\n"
@@ -325,16 +385,15 @@ def _ensure_connected(
                 
                 port_arg = fg_conn['connection']
                 
-                with AgentClient(port=agent_port) as client:
-                    result = client.send_command(
-                        'session_setup',
-                        port=port_arg,
-                        core=fg_conn.get('core') or "RP2350",
-                        device=fg_conn.get('device'),
-                        as_foreground=True,
-                        set_default=False,
-                        local_default=default_conn,
-                    )
+                result = client.send_command(
+                    'session_setup',
+                    port=port_arg,
+                    core=fg_conn.get('core') or "RP2350",
+                    device=fg_conn.get('device'),
+                    as_foreground=True,
+                    set_default=False,
+                    local_default=default_conn,
+                )
                 
                 if result.get('switched_from'):
                     OutputHelper.print_panel(
@@ -373,6 +432,7 @@ def _ensure_connected(
                 STATE.version = status.get('version', STATE.version)
                 set_global_context(STATE.core, STATE.device, STATE.version, STATE.device_root_fs, STATE.device_path)
                 
+                _store_pending_client(client, reusable_client)
                 return status
 
         if not explicit_port:
@@ -382,25 +442,26 @@ def _ensure_connected(
             STATE.device_root_fs = status.get('device_root_fs', STATE.device_root_fs)
             set_global_context(STATE.core, STATE.device, STATE.version, STATE.device_root_fs, STATE.device_path)
             
+            _store_pending_client(client, reusable_client)
             return status
         
         if explicit_port:
-            explicit_conn = _resolve_connection(explicit_port)
+            explicit_conn = _resolve_connection(explicit_port, agent_port=agent_port)
             if explicit_conn:
                 explicit_key = explicit_conn['connection']
                 if _port_norm(explicit_key) != _port_norm(current_fg) and _port_norm(explicit_key) not in [_port_norm(bg) for bg in current_bgs]:
                     port_arg = explicit_conn['connection']
                     
                     try:
-                        with AgentClient(port=agent_port) as client:
-                            bg_result = client.send_command(
-                                'session_setup',
-                                port=port_arg,
-                                core=explicit_conn.get('core') or "RP2350",
-                                device=explicit_conn.get('device'),
-                                as_foreground=False,  # bg로 추가
-                                set_default=False,
-                            )
+                        bg_result = client.send_command(
+                            'session_setup',
+                            port=port_arg,
+                            core=explicit_conn.get('core') or "RP2350",
+                            device=explicit_conn.get('device'),
+                            as_foreground=False,  # bg로 추가
+                            set_default=False,
+                        )
+                        status = bg_result
 
                         if bg_result and not bg_result.get('existing', False):
                             _print_connect_info(
@@ -433,24 +494,22 @@ def _ensure_connected(
                         _handle_connection_error(e, port=port_arg)
                         raise typer.Exit(1)
         
-        if explicit_port:
-            if client is None:
-                with AgentClient(port=agent_port, device_port=explicit_port) as status_client:
-                    status = status_client.send_command('status')
-            else:
-                status = client.send_command('status', port=explicit_port)
-        
         STATE.core = status.get('core', STATE.core)
         STATE.device = status.get('device', STATE.device)
         STATE.version = status.get('version', STATE.version)
         STATE.device_root_fs = status.get('device_root_fs', STATE.device_root_fs)
         set_global_context(STATE.core, STATE.device, STATE.version, STATE.device_root_fs, STATE.device_path)
         
+        _store_pending_client(client, reusable_client)
         return status
         
     except typer.Exit:
+        if reusable_client:
+            client.disconnect()
         raise
     except Exception as e:
+        if reusable_client:
+            client.disconnect()
         if _is_transport_connection_error(e):
             OutputHelper.print_panel(
                 "Board connection lost.\n\n"
@@ -476,7 +535,7 @@ def _get_current_agent_port() -> int:
     with _agent_port_cache_lock:
         if _cached_agent_port is None:
             env_path = _find_env_file()
-            _cached_agent_port = _find_available_agent_port(env_path)
+            _cached_agent_port = _find_available_agent_port(env_path, probe=False)
     return _cached_agent_port
 
 
@@ -488,6 +547,13 @@ def _get_device_port() -> Optional[str]:
 
 
 def _create_agent_client(*, include_device_port: bool = True) -> AgentClient:
+    pending = _take_pending_client(
+        _get_current_agent_port(),
+        _get_device_port() if include_device_port else None,
+    )
+    if pending is not None:
+        return pending
+
     device_port = _get_device_port() if include_device_port else None
     return AgentClient(port=_get_current_agent_port(), device_port=device_port)
 
