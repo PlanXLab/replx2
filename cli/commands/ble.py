@@ -1,5 +1,4 @@
 import json
-import os
 import signal
 import sys
 import time
@@ -16,8 +15,20 @@ from ..agent.client import AgentClient
 from ..app import app
 from ..connection import _create_agent_client, _ensure_connected
 from ..helpers import CONSOLE_WIDTH, OutputHelper, get_panel_box
-from replx.terminal import IS_WINDOWS
+from replx.terminal import IS_WINDOWS, getch_nonblock
 from replx.utils.constants import CTRL_C
+
+
+def _read_keyboard_key() -> str | None:
+    try:
+        data = getch_nonblock()
+    except (OSError, ValueError):
+        return None
+    if not data:
+        return None
+    if data == CTRL_C:
+        return "\x03"
+    return data.decode("utf-8", errors="replace")
 
 
 @app.command(
@@ -1329,34 +1340,6 @@ except Exception as exc:
         elif value > len(devices):
             ui_state["number_buffer"] = ""
 
-    def _read_key():
-        try:
-            if IS_WINDOWS:
-                import msvcrt
-                if not msvcrt.kbhit():
-                    return None
-                key = msvcrt.getwch()
-                if key in ("\x00", "\xe0"):
-                    msvcrt.getwch()
-                    return None
-                return key
-
-            import select
-            if fd is None:
-                return None
-            ready, _, _ = select.select([sys.stdin], [], [], 0)
-            if not ready:
-                return None
-            data = os.read(fd, 1)
-            if data == CTRL_C:
-                return "\x03"
-            try:
-                return data.decode("utf-8")
-            except Exception:
-                return None
-        except Exception:
-            return None
-
     def _handle_key(key):
         nonlocal stop_requested
         if key is None:
@@ -1483,7 +1466,7 @@ except Exception as exc:
             return pending_input.pop(0)
         _expire_number_buffer()
         _refresh_expired_devices()
-        _handle_key(_read_key())
+        _handle_key(_read_keyboard_key())
         return None
 
     def stop_check() -> bool:
@@ -2997,34 +2980,6 @@ except Exception as exc:
             state["edit_error"] = None
             _update_live()
 
-    def _read_key():
-        try:
-            if IS_WINDOWS:
-                import msvcrt
-                if not msvcrt.kbhit():
-                    return None
-                key = msvcrt.getwch()
-                if key in ("\x00", "\xe0"):
-                    msvcrt.getwch()
-                    return None
-                return key
-
-            import select
-            if fd is None:
-                return None
-            ready, _, _ = select.select([sys.stdin], [], [], 0)
-            if not ready:
-                return None
-            data = os.read(fd, 1)
-            if data == CTRL_C:
-                return "\x03"
-            try:
-                return data.decode("utf-8")
-            except Exception:
-                return None
-        except Exception:
-            return None
-
     def _handle_key(key):
         if key is None:
             return
@@ -3044,7 +2999,7 @@ except Exception as exc:
     def _input_provider() -> bytes:
         if pending_input:
             return pending_input.pop(0)
-        _handle_key(_read_key())
+        _handle_key(_read_keyboard_key())
         return b""
 
     def _stop_check() -> bool:
@@ -4148,34 +4103,6 @@ finally:
             state["edit_error"] = None
             _update_live()
 
-    def _read_key():
-        try:
-            if IS_WINDOWS:
-                import msvcrt
-                if not msvcrt.kbhit():
-                    return None
-                key = msvcrt.getwch()
-                if key in ("\x00", "\xe0"):
-                    msvcrt.getwch()
-                    return None
-                return key
-
-            import select
-            if fd is None:
-                return None
-            ready, _, _ = select.select([sys.stdin], [], [], 0)
-            if not ready:
-                return None
-            data = os.read(fd, 1)
-            if data == CTRL_C:
-                return "\x03"
-            try:
-                return data.decode("utf-8")
-            except Exception:
-                return None
-        except Exception:
-            return None
-
     def _handle_key(key):
         if key is None:
             return
@@ -4199,7 +4126,7 @@ finally:
     def _input_provider() -> bytes:
         if pending_input:
             return pending_input.pop(0)
-        _handle_key(_read_key())
+        _handle_key(_read_keyboard_key())
         return b""
 
     def _stop_check() -> bool:

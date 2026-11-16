@@ -11,14 +11,13 @@ import hashlib
 import subprocess
 import shutil
 import tempfile
-from collections import deque
 from pathlib import Path
 
 import typer
 from rich.panel import Panel
 
 from replx.terminal import (
-    IS_WINDOWS, getch, disable_quick_edit_mode, restore_console_mode,
+    IS_WINDOWS, getch, getch_nonblock, disable_quick_edit_mode, restore_console_mode,
     LineModeTerminal, utf8_need_follow, read_escape_sequence,
 )
 from replx.utils.constants import CTRL_C, CTRL_D
@@ -77,25 +76,6 @@ def _wrap_trailing_expression_for_print(code: str) -> str:
 
 def _is_repl_enter_key(ch: bytes) -> bool:
     return ch in (b"\r", b"\n", b"\r\n", b"\n\r")
-
-
-def _setup_readline_for_repl():
-    try:
-        import readline
-    except ImportError:
-        return None
-
-    try:
-        readline.parse_and_bind("set editing-mode emacs")
-    except Exception:
-        pass
-
-    try:
-        readline.set_auto_history(False)
-    except Exception:
-        pass
-
-    return readline
 
 
 def _resolve_vscode_command() -> list[str] | None:
@@ -535,14 +515,12 @@ def _run_interactive_mode(client, device_exec_code: str | None, local_file: str 
                             sys.stdout.flush()
                         return ch.encode('utf-8')
             else:
-                import select
-                r, _, _ = select.select([sys.stdin], [], [], 0)
-                if r:
-                    ch = os.read(sys.stdin.fileno(), 1)
+                ch = getch_nonblock()
+                if ch is not None:
                     if ch == CTRL_C:
                         stop_requested = True
                         return CTRL_C
-                    elif ch == b'\n':
+                    elif ch in (b'\r', b'\n'):
                         if echo:
                             sys.stdout.buffer.write(b'\r\n')
                             sys.stdout.buffer.flush()
@@ -1087,14 +1065,12 @@ By default, runs a file from your computer. Use -d to run from device.
                                     sys.stdout.flush()
                                 return ch.encode('utf-8')
                     else:
-                        import select
-                        r, _, _ = select.select([sys.stdin], [], [], 0)
-                        if r:
-                            ch = os.read(sys.stdin.fileno(), 1)
+                        ch = getch_nonblock()
+                        if ch is not None:
                             if ch == CTRL_C:
                                 stop_requested = True
                                 return CTRL_C
-                            elif ch == b'\n':
+                            elif ch in (b'\r', b'\n'):
                                 if echo:
                                     sys.stdout.buffer.write(b'\r\n')
                                     sys.stdout.buffer.flush()
@@ -1387,45 +1363,6 @@ Start a live MicroPython session where you can type code line by line.
     
     repl_running = [True]
     reader_client = [None]
-    pending_echoes = deque()
-    pending_echo_lock = threading.Lock()
-    pending_output_fragment = [""]
-
-    def _queue_pending_echo(line: str) -> None:
-        with pending_echo_lock:
-            pending_echoes.append(line + "\r\n")
-
-    def _strip_pending_echo(output: str) -> str:
-        if not output:
-            return output
-
-        with pending_echo_lock:
-            text = pending_output_fragment[0] + output
-            normalized = text.replace("\r\n", "\n")
-            pending_output_fragment[0] = ""
-
-            if not normalized:
-                return ""
-
-            trailing_fragment = "" if normalized.endswith("\n") else normalized.split("\n")[-1]
-            lines = normalized.splitlines(keepends=True)
-            if trailing_fragment and lines:
-                lines = lines[:-1]
-
-            kept: list[str] = []
-            for line in lines:
-                if pending_echoes and line == pending_echoes[0].replace("\r\n", "\n"):
-                    pending_echoes.popleft()
-                    continue
-                kept.append(line)
-
-            if trailing_fragment:
-                if pending_echoes and pending_echoes[0].replace("\r\n", "\n").startswith(trailing_fragment):
-                    pending_output_fragment[0] = trailing_fragment
-                else:
-                    kept.append(trailing_fragment)
-
-            return "".join(kept)
     
     def reader_thread_func():
         try:
@@ -1437,10 +1374,6 @@ Start a live MicroPython session where you can type code line by line.
                     output = result.get('output', '')
                     if output:
                         sleep_time = 0.005
-                        if sys.platform == 'darwin':
-                            output = _strip_pending_echo(output)
-                            if not output:
-                                continue
                         output = colorize_prompt(output)
                         if IS_WINDOWS:
                             sys.stdout.buffer.write(output.encode('utf-8').replace(b'\r', b''))
@@ -1487,6 +1420,8 @@ Start a live MicroPython session where you can type code line by line.
             first = os.read(_repl_fd, 1)
             if not first:
                 return b''
+            if first == b'\x1b':
+                return read_escape_sequence(_repl_fd, first)
             need = utf8_need_follow(first[0])
             if need:
                 return first + os.read(_repl_fd, need)
@@ -1508,71 +1443,46 @@ Start a live MicroPython session where you can type code line by line.
     input_buffer = ""
 
     try:
-        if sys.platform == 'darwin':
-            readline_mod = _setup_readline_for_repl()
-            while True:
-                try:
-                    line = input()
-                except EOFError:
-                    break
-                except KeyboardInterrupt:
+        while True:
+            char = _repl_getch()
+                
+            if char == b'\x00' or not char:
+                continue
+            
+            if char == CTRL_D:
+                break
+            
+            if _is_repl_enter_key(char):
+                if input_buffer.strip() == 'exit()':
+                    repl_running[0] = False
+                    reader.join(timeout=0.3)
                     try:
                         writer_client.send_command('repl_write', data='\x03', timeout=1.5, max_retries=1)
                     except Exception:
-                        break
-                    continue
-
-                if line.strip() == 'exit()':
+                        pass
                     break
-
+                input_buffer = ""
                 try:
-                    if readline_mod and line and (readline_mod.get_current_history_length() == 0 or readline_mod.get_history_item(readline_mod.get_current_history_length()) != line):
-                        readline_mod.add_history(line)
-                    _queue_pending_echo(line)
-                    writer_client.send_command('repl_write', data=line + repl_enter_data, timeout=1.5, max_retries=1)
+                    writer_client.send_command('repl_write', data=repl_enter_data, timeout=1.5, max_retries=1)
                 except Exception:
                     break
-        else:
-            while True:
-                char = _repl_getch()
-                
-                if char == b'\x00' or not char:
-                    continue
-                
-                if char == CTRL_D:
+            elif char == b'\x7f' or char == b'\x08':
+                if input_buffer:
+                    input_buffer = input_buffer[:-1]
+                try:
+                    writer_client.send_command('repl_write', data=char.decode('utf-8', errors='replace'), timeout=1.5, max_retries=1)
+                except Exception:
                     break
-                
-                if _is_repl_enter_key(char):
-                    if input_buffer.strip() == 'exit()':
-                        repl_running[0] = False
-                        reader.join(timeout=0.3)
-                        try:
-                            writer_client.send_command('repl_write', data='\x03', timeout=1.5, max_retries=1)
-                        except Exception:
-                            pass
-                        break
-                    input_buffer = ""
+            else:
+                if char >= b' ':
                     try:
-                        writer_client.send_command('repl_write', data=repl_enter_data, timeout=1.5, max_retries=1)
-                    except Exception:
-                        break
-                elif char == b'\x7f' or char == b'\x08':
-                    if input_buffer:
-                        input_buffer = input_buffer[:-1]
-                    try:
-                        writer_client.send_command('repl_write', data=char.decode('utf-8', errors='replace'), timeout=1.5, max_retries=1)
-                    except Exception:
-                        break
-                else:
-                    if char >= b' ':
-                        try:
-                            input_buffer += char.decode('utf-8', errors='ignore')
-                        except UnicodeDecodeError:
-                            pass
-                    try:
-                        writer_client.send_command('repl_write', data=char.decode('utf-8', errors='replace'), timeout=1.5, max_retries=1)
-                    except Exception:
-                        break
+                        input_buffer += char.decode('utf-8', errors='ignore')
+                    except UnicodeDecodeError:
+                        pass
+                try:
+                    writer_client.send_command('repl_write', data=char.decode('utf-8', errors='replace'), timeout=1.5, max_retries=1)
+                except Exception:
+                    break
                 
     except KeyboardInterrupt:
         pass

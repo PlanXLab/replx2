@@ -283,6 +283,8 @@ else:
             first = os.read(_FD, 1)
             if not first:
                 return None
+            if first == b"\x1b":
+                return read_escape_sequence(_FD, first)
             need = utf8_need_follow(first[0])
             return first + (os.read(_FD, need) if need else b"")
         except (OSError, IOError):
@@ -294,6 +296,8 @@ else:
         try:
             raw_mode(True)
             first = os.read(_FD, 1)
+            if first == b"\x1b":
+                return read_escape_sequence(_FD, first)
             need = utf8_need_follow(first[0])
             return first + (os.read(_FD, need) if need else b"")
         except Exception:
