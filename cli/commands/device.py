@@ -199,7 +199,10 @@ def _detect_vscode_theme_for_setup() -> str | None:
     return None
 
 
-def _create_vscode_files_and_typehints(vscode_dir: str, core: str, device: str, overwrite: bool = False):
+def _create_vscode_files_and_typehints(
+    vscode_dir: str, core: str, device: str, overwrite: bool = False,
+    manufacturer: str = ""
+):
     task_file = os.path.join(vscode_dir, "tasks.json")
     settings_file = os.path.join(vscode_dir, "settings.json")
     launch_file = os.path.join(vscode_dir, "launch.json")
@@ -221,7 +224,7 @@ def _create_vscode_files_and_typehints(vscode_dir: str, core: str, device: str, 
     
     extra_paths = []
     
-    from replx.utils.device_info import is_std_micropython
+    from replx.utils.device_info import is_std_micropython, resolve_package_device
     if is_std_micropython(core):
         comm_path = StoreManager.comm_typehints_path()
     else:
@@ -246,7 +249,8 @@ def _create_vscode_files_and_typehints(vscode_dir: str, core: str, device: str, 
             extra_paths.append(device_builtin)
     
     if device:
-        device_path = device_name_to_path(device)
+        package_device = resolve_package_device(core, device, manufacturer)
+        device_path = device_name_to_path(package_device)
         device_typehints = os.path.join(StoreManager.pkg_root(), "device", device_path, "typehints")
         if os.path.isdir(device_typehints):
             extra_paths.append(device_typehints)
@@ -496,7 +500,9 @@ Run this once per project folder to set up your workspace.
                     except Exception as e:
                         default_sync_warning = str(e)
                     
-                    typehint_paths = _create_vscode_files_and_typehints(vscode_dir, core, device)
+                    typehint_paths = _create_vscode_files_and_typehints(
+                        vscode_dir, core, device, manufacturer=manufacturer
+                    )
                     
                     content = f"Connection: [bright_blue]{_serial_port_display(current_port)}[/bright_blue] [dim](Default)[/dim]\n"
                     content += f"Version: [yellow]{version}[/yellow]\n"
@@ -551,7 +557,10 @@ Run this once per project folder to set up your workspace.
                             set_default=True 
                         )
                         
-                        typehint_paths = _create_vscode_files_and_typehints(vscode_dir, STATE.core, STATE.device)
+                        typehint_paths = _create_vscode_files_and_typehints(
+                            vscode_dir, STATE.core, STATE.device,
+                            manufacturer=STATE.manufacturer
+                        )
                         
                         workspace = os.path.dirname(vscode_dir)
                         content = f"Connection: [bright_blue]{_serial_port_display(port)}[/bright_blue] [dim](Default)[/dim]\n"
@@ -671,7 +680,10 @@ Run this once per project folder to set up your workspace.
         set_default=set_as_default
     )
     
-    typehint_paths = _create_vscode_files_and_typehints(vscode_dir, STATE.core, STATE.device, overwrite=True)
+    typehint_paths = _create_vscode_files_and_typehints(
+        vscode_dir, STATE.core, STATE.device, overwrite=True,
+        manufacturer=STATE.manufacturer
+    )
     
     display_conn = port
     workspace = os.path.dirname(vscode_dir)

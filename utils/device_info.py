@@ -97,6 +97,17 @@ def normalize_core(core: str) -> str:
     return core
 
 
+def resolve_package_device(core: str, device: str, manufacturer: str) -> str:
+    device_name = (device or '').strip()
+    if (
+        normalize_core(core) == 'EFR32MG'
+        and device_name.casefold() == 'xbee3'
+        and (manufacturer or '').strip().casefold() == 'digi'
+    ):
+        return 'xnode'
+    return device_name
+
+
 def get_core_profile(core: str) -> dict:
     normalized = normalize_core(core)
     profile = CORE_PROFILES.get(normalized, {})

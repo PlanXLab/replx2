@@ -35,6 +35,7 @@ Device features depend on the firmware APIs available on the connected board; se
 
 - Use XCTU to select MicroPython mode (`AP=4`) and set the REPL UART to 115200 baud. Zigbee transparent/API mode is not a Python REPL; `replx` does not change the module's AT settings.
 - The board filesystem root `/` maps to `/flash`. Use small programs; XBee's older vendor runtime may not support current MicroPython syntax or packages. Package compatibility is still up to the package.
+- When core is `EFR32MG`, device is `xbee3`, and manufacturer is `Digi`, `pkg search`/`download`/`update` and `init` use the `xnode` device-library target (`device/xnode` locally and `/lib/xnode/` on the board); hardware status continues to report XBee3.
 - `pkg update core.all`, `pkg update device.all`, and `init` compile Python files for the connected firmware and install `.mpy` files, including on xnode. `mip install --no-compile` remains available for intentional source uploads.
 - XBee3 firmware versions are mapped to compatible compiler profiles: 1.22–1.23 use their matching profiles, 1.20–1.21 use the 1.20 profile, 1.12–1.19 use the nearest supported legacy compiler, and 1.9–1.11 use the corresponding older profile. Firmware older than 1.9 is rejected rather than receiving an incompatible `.mpy`.
 - `format` and the formatting step of `init` allow up to 120 seconds for the agent response. Back up files first: both erase the filesystem. `df` queries the `/flash` mount rather than the virtual `/` root.
@@ -808,7 +809,7 @@ replx pkg update device.termio.py
 replx pkg clean
 ```
 
-> Note: `pkg search/download/update` operates within the **core/device scope of the currently connected board**.
+> Note: `pkg search/download/update` operates within the **core/device scope of the currently connected board**. Digi XBee3/EFR32MG uses the `xnode` device-library target.
 
 On Digi XBee3/EFR32MG (including xnode), Python files are compiled with the firmware-matched legacy compiler and installed as `.mpy`; progress is shown as "Compiling". Other supported cores retain their existing `.mpy` compilation. This also applies to package installation performed by `init`; compiled installation does not guarantee that a package supports Digi's vendor APIs.
 

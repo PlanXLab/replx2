@@ -12,6 +12,7 @@ from ..helpers import (
     get_panel_box, CONSOLE_WIDTH
 )
 from replx.utils import device_name_to_path
+from replx.utils.device_info import resolve_package_device
 from ..config import STATE
 from ..connection import (
     _ensure_connected, _create_agent_client
@@ -320,6 +321,7 @@ def _pkg_download(args: list[str], owner: str, repo: str, ref: str,
             raise typer.BadParameter(str(e))
 
     result = result or {}
+    package_device = (result.get("device") or dev).strip()
 
     if not result.get("core_in_registry", True):
         OutputHelper.print_panel(
@@ -347,10 +349,10 @@ def _pkg_download(args: list[str], owner: str, repo: str, ref: str,
         _sync_typehints(client)
 
     if total == 0:
-        if dev == core:
+        if package_device == core:
             message = f"Core [bright_green]{core}[/bright_green] is already up to date."
         else:
-            message = f"Core [bright_green]{core}[/bright_green] and device [bright_green]{dev}[/bright_green] are already up to date."
+            message = f"Core [bright_green]{core}[/bright_green] and device [bright_green]{package_device}[/bright_green] are already up to date."
     else:
         message = f"[bright_green]{download_target}[/bright_green]: [green]{total}[/green] file(s) downloaded. ( {new_count},  {upd_count})"
     
@@ -377,6 +379,9 @@ def _install_spec_internal(spec: str, live=None, update_callback=None):
     if not (spec.startswith("core.") or spec.startswith("device.")):
         raise typer.BadParameter(f"Invalid spec format: {spec}")
 
+    package_device = resolve_package_device(
+        STATE.core, STATE.device, STATE.manufacturer
+    )
     client = _create_agent_client()
 
     own_live = None
@@ -415,7 +420,7 @@ def _install_spec_internal(spec: str, live=None, update_callback=None):
                 msg = "Complete"
             render(OutputHelper.create_progress_panel(
                 sent, bytes_total,
-                title=f"Installing {spec} to {STATE.device}",
+                title=f"Installing {spec} to {package_device}",
                 message=msg,
                 counter_text=f"({OutputHelper.format_bytes(sent)}/{OutputHelper.format_bytes(bytes_total)})",
             ))
@@ -424,7 +429,7 @@ def _install_spec_internal(spec: str, live=None, update_callback=None):
         if live is None and update_callback is None:
             own_live = Live(
                 OutputHelper.create_progress_panel(
-                    0, 1, title=f"Installing {spec} to {STATE.device}",
+                    0, 1, title=f"Installing {spec} to {package_device}",
                     message="Preparing..."),
                 console=OutputHelper._console, refresh_per_second=10)
             own_live.start()
@@ -533,11 +538,14 @@ def _pkg_clean(args: list[str]):
     import shutil
 
     _ensure_connected()
+    package_device = resolve_package_device(
+        STATE.core, STATE.device, STATE.manufacturer
+    )
 
     def _remove_client_typehints_cache():
         for path in (
             os.path.join(StoreManager.pkg_root(), "core", STATE.core),
-            os.path.join(StoreManager.pkg_root(), "device", device_name_to_path(STATE.device)),
+            os.path.join(StoreManager.pkg_root(), "device", device_name_to_path(package_device)),
         ):
             if os.path.isdir(path):
                 try:
@@ -561,7 +569,7 @@ def _pkg_clean(args: list[str]):
     if not result.get("found"):
         _remove_client_typehints_cache()
         OutputHelper.print_panel(
-            f"No libraries for [yellow]{STATE.core}/{STATE.device}[/yellow] found in local store.",
+            f"No libraries for [yellow]{STATE.core}/{package_device}[/yellow] found in local store.",
             title="Clean",
             border_style="warning"
         )
