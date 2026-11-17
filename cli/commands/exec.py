@@ -27,8 +27,8 @@ from ..helpers import (
 )
 from ..config import STATE, ConfigManager
 from ..connection import (
-    _ensure_connected, _create_agent_client,
-    _get_current_agent_port, _get_global_options,
+    _ensure_connected, _create_agent_client, _reuse_agent_client,
+    _get_global_options,
 )
 
 from ..app import app
@@ -1584,15 +1584,14 @@ Use familiar commands (ls, cd, cat, etc.) without typing "replx" each time.
         raise typer.Exit()
 
     _ensure_connected()
+    shell_client = _create_agent_client()
 
     # shell은 항상 fg 연결이 필요하다. --port가 명시된 경우 해당 포트를 fg로 전환한다.
     _global_opts = _get_global_options()
     _explicit_port = _global_opts.get('port')
     if _explicit_port:
-        from ..agent.client import AgentClient as _AgentClient
-        _agent_port = _get_current_agent_port()
         try:
-            _result = _AgentClient(port=_agent_port).send_command(
+            _result = shell_client.send_command(
                 'session_switch_fg', port=_explicit_port, timeout=3.0
             )
             if not (_result and _result.get('success')):
@@ -1608,8 +1607,10 @@ Use familiar commands (ls, cd, cat, etc.) without typing "replx" each time.
             STATE.version = _result.get('version', STATE.version)
             STATE.device_root_fs = _result.get('device_root_fs', STATE.device_root_fs)
         except typer.Exit:
+            shell_client.disconnect()
             raise
         except Exception as _e:
+            shell_client.disconnect()
             OutputHelper.print_panel(
                 f"Failed to switch foreground: {_e}",
                 title="Shell Error",
@@ -1628,6 +1629,7 @@ Use familiar commands (ls, cd, cat, etc.) without typing "replx" each time.
     from .i2s import i2s_cmd
     from .ws2812 import ws2812_cmd
     from .ble import ble
+    from .wifi import wifi as wifi_cmd
     from .utility import whoami
 
     SHELL_COMMANDS = {
@@ -1786,46 +1788,17 @@ Use familiar commands (ls, cd, cat, etc.) without typing "replx" each time.
             elif cmd == "repl":
                 repl(show_help=True)
             elif cmd == "run":
+                try:
+                    run(show_help=True)
+                except typer.Exit:
+                    pass
                 shell_console.print(Panel("""\
-Run a script from device storage.
-In shell mode, 'run' always runs from device (equivalent to 'replx run -d').
-
-[bold cyan]Usage:[/bold cyan]
-  run [yellow]SCRIPT_FILE[/yellow] [[yellow]--text[/yellow]|[yellow]--hex[/yellow]]
-
-[bold cyan]Arguments:[/bold cyan]
-  [yellow]SCRIPT_FILE[/yellow]  Script file path on device [red][required][/red]
-
-[bold cyan]Options:[/bold cyan]
-  [yellow]--text[/yellow]       Line input mode: display output as text
-  [yellow]--hex[/yellow]        Line input mode: display output as hex bytes
-
-[bold cyan]Examples:[/bold cyan]
-  run main.py           [dim]# Run /main.py from device[/dim]
-  run main.py --text    [dim]# Run and show output as text lines[/dim]
-  run lib/test.py --hex [dim]# Run and show output as hex[/dim]
-  run t1.mpy            [dim]# Run .mpy file from device[/dim]
-
-[bold yellow]Note:[/bold yellow]
-  In shell mode, -e/--echo and -n/--non-interactive are not available.
-  Use 'replx run' directly for those options.""", border_style=OutputHelper._resolve_category_color('neutral'), box=get_panel_box(), width=CONSOLE_WIDTH))
+Shell behavior:
+  • [yellow]run SCRIPT_FILE[/yellow] always runs a script from board storage, equivalent to [bright_blue]replx run -d SCRIPT_FILE[/bright_blue].
+  • Relative paths are resolved from the shell's current device directory.
+  • [yellow]-e/--echo[/yellow] and [yellow]-n/--non-interactive[/yellow] are unavailable in shell mode.""", border_style=OutputHelper._resolve_category_color('neutral'), box=get_panel_box(), width=CONSOLE_WIDTH))
             elif cmd == "wifi":
-                shell_console.print(Panel("""\
-Manage WiFi connection.
-
-[bold cyan]Usage:[/bold cyan]
-  wifi                          [dim]# Show WiFi status[/dim]
-  wifi connect [yellow]SSID PW[/yellow]         [dim]# Connect and save config[/dim]
-  wifi connect                  [dim]# Connect using saved credentials[/dim]
-  wifi off                      [dim]# Disable WiFi[/dim]
-  wifi scan                     [dim]# Scan for networks[/dim]
-  wifi boot on                  [dim]# Enable auto-connect on boot[/dim]
-  wifi boot off                 [dim]# Disable auto-connect on boot[/dim]
-
-[bold cyan]Examples:[/bold cyan]
-  wifi                               [dim]# Check status[/dim]
-  wifi connect MyNetwork secret123   [dim]# Connect[/dim]
-  wifi scan                          [dim]# Find networks[/dim]""", border_style=OutputHelper._resolve_category_color('neutral'), box=get_panel_box(), width=CONSOLE_WIDTH))
+                wifi_cmd(args=None, show_help=True)
             elif cmd == "whoami":
                 whoami(show_help=True)
             elif cmd == "ble":
@@ -2593,36 +2566,39 @@ Manage WiFi connection.
     def signal_handler(sig, frame):
         print("\nType 'exit' to quit shell.")
     
-    old_handler = signal.signal(signal.SIGINT, signal_handler)
-    
     try:
-        while shell_running:
+        with _reuse_agent_client(shell_client):
+            old_handler = signal.signal(signal.SIGINT, signal_handler)
             try:
-                _cleanup_windows_batch_prompt_artifacts()
-                print_prompt()
-                line = sys.stdin.buffer.readline().decode(errors='replace').rstrip()
-                if not line:
-                    continue
-                try:
-                    run_shell_cmd(line)
-                except SystemExit:
-                    break
-                except Exception as e:
-                    OutputHelper.print_panel(
-                        str(e),
-                        title="Error",
-                        border_style="error"
-                    )
-            except EOFError:
-                break
-            
+                while shell_running:
+                    try:
+                        _cleanup_windows_batch_prompt_artifacts()
+                        print_prompt()
+                        line = sys.stdin.buffer.readline().decode(errors='replace').rstrip()
+                        if not line:
+                            continue
+                        try:
+                            run_shell_cmd(line)
+                        except SystemExit:
+                            break
+                        except Exception as e:
+                            OutputHelper.print_panel(
+                                str(e),
+                                title="Error",
+                                border_style="error"
+                            )
+                    except EOFError:
+                        break
+                
+            finally:
+                signal.signal(signal.SIGINT, old_handler)
+                OutputHelper.print_panel(
+                    "Shell session ended.",
+                    title="Exit Shell",
+                    border_style="mode"
+                )
     finally:
-        signal.signal(signal.SIGINT, old_handler)
-        OutputHelper.print_panel(
-            "Shell session ended.",
-            title="Exit Shell",
-            border_style="mode"
-        )
+        shell_client.disconnect()
 
 
 @app.command(rich_help_panel="Device Management")

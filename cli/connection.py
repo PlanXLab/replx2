@@ -1,7 +1,9 @@
 import os
 import sys
 import threading
-from typing import Optional
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import Generator, Optional
 
 import typer
 
@@ -19,6 +21,44 @@ from .config import (
 
 _pending_client: Optional[AgentClient] = None
 _pending_client_lock = threading.Lock()
+_active_agent_client: ContextVar[Optional[AgentClient]] = ContextVar(
+    "active_agent_client",
+    default=None,
+)
+
+
+class _BorrowedAgentClient(AgentClient):
+    def __init__(self, client: AgentClient):
+        object.__setattr__(self, "_client", client)
+
+    def __getattribute__(self, name):
+        if name in {"_client", "disconnect", "__enter__", "__exit__", "__class__"}:
+            return object.__getattribute__(self, name)
+        return getattr(object.__getattribute__(self, "_client"), name)
+
+    def __setattr__(self, name, value):
+        if name == "_client":
+            object.__setattr__(self, name, value)
+        else:
+            setattr(object.__getattribute__(self, "_client"), name, value)
+
+    def disconnect(self) -> None:
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, _exc_type, _exc_val, _exc_tb):
+        return super().__exit__(_exc_type, _exc_val, _exc_tb)
+
+
+@contextmanager
+def _reuse_agent_client(client: AgentClient) -> Generator[None, None, None]:
+    token = _active_agent_client.set(client)
+    try:
+        yield
+    finally:
+        _active_agent_client.reset(token)
 
 
 def _take_pending_client(
@@ -118,6 +158,11 @@ def _ensure_connected(
     ctx: typer.Context = None,
     client: Optional[AgentClient] = None,
 ) -> dict:
+    if client is None:
+        active_client = _active_agent_client.get()
+        if active_client is not None:
+            client = _BorrowedAgentClient(active_client)
+
     reusable_client = client is None
     global_opts = _get_global_options()
     explicit_port = global_opts.get('port')
@@ -547,6 +592,10 @@ def _get_device_port() -> Optional[str]:
 
 
 def _create_agent_client(*, include_device_port: bool = True) -> AgentClient:
+    active_client = _active_agent_client.get()
+    if active_client is not None:
+        return _BorrowedAgentClient(active_client)
+
     pending = _take_pending_client(
         _get_current_agent_port(),
         _get_device_port() if include_device_port else None,
