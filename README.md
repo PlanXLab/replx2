@@ -161,7 +161,15 @@ For remote connections, set the same `REPLX_AGENT_TOKEN` on the agent and client
 
 #### `setup`
 The first command to run when starting a new project. After confirming the board connection, it creates `.vscode/tasks.json`, `.vscode/settings.json`, and `.vscode/launch.json`, configures the Pylance typehint path, and saves the current port as the workspace Default. A port is required, except for `--clean`.
-Settings apply at the workspace level; running from a subfolder applies them to the parent workspace scope. If no config exists in a parent path, each path is treated as an independent workspace with its own default port.
+`setup` requires the `WORKSPACE_ROOT` environment variable in the VS Code integrated terminal. Add this to the workspace `.vscode/settings.json`, then open a new integrated terminal:
+```json
+{
+  "terminal.integrated.env.windows": { "WORKSPACE_ROOT": "${workspaceFolder}" },
+  "terminal.integrated.env.osx": { "WORKSPACE_ROOT": "${workspaceFolder}" },
+  "terminal.integrated.env.linux": { "WORKSPACE_ROOT": "${workspaceFolder}" }
+}
+```
+From a subfolder, `setup` searches upward only as far as that workspace root and uses the nearest `.vscode` folder. It refuses to run when the variable is missing, invalid, or the current directory is outside the workspace. On board changes it refreshes replx-managed Pylance paths while preserving user `extraPaths` and other settings.
 The filesystem root (`C:\`, `/`) cannot be used as a workspace.
 
 Usage:

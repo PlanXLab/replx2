@@ -20,7 +20,7 @@ from ..helpers import (
 )
 from ..config import (
     STATE,
-    _find_env_file, _find_or_create_vscode_dir,
+    _find_env_file,
     _read_env_ini,
     _update_connection_config, _find_available_agent_port, _find_running_agent_ports,
     _get_global_options, AgentPortManager
@@ -29,14 +29,6 @@ from ..connection import (
     _ensure_connected, _create_agent_client
 )
 from ..app import app
-
-
-def _normalize_path_for_comparison(path: str) -> str:
-    path = os.path.normpath(path)
-    if sys.platform.startswith("win"):
-        return path.lower()
-    else:
-        return path
 
 
 def _serial_port_cmp_key(port: str) -> str:
@@ -57,44 +49,6 @@ def _resolve_os_serial_port_name(port: str) -> str:
         return port
     p = str(port).strip()
     return p.upper() if IS_WINDOWS and re.fullmatch(r"(?i)com\d+", p) else p
-
-
-def _check_vscode_version(vscode_dir: str) -> bool:
-    settings_file = os.path.join(vscode_dir, "settings.json")
-    
-    for item in os.listdir(vscode_dir):
-        if item.endswith('.pyi'):
-            return True
-    
-    if os.path.exists(settings_file):
-        try:
-            with open(settings_file, "r", encoding="utf-8") as f:
-                settings = json.load(f)
-            extra_paths = settings.get("python.analysis.extraPaths", [])
-            
-            if not extra_paths:
-                return False
-            
-            has_replx_typehints = False
-            for path in extra_paths:
-                norm_path = os.path.normpath(path)
-                if 'replx' in norm_path and 'typehints' in norm_path:
-                    has_replx_typehints = True
-                    break
-            
-            vscode_norm = _normalize_path_for_comparison(vscode_dir)
-            for path in extra_paths:
-                norm_path = _normalize_path_for_comparison(path)
-                if norm_path.startswith(vscode_norm):
-                    return True
-            
-            if extra_paths and not has_replx_typehints:
-                return True
-                
-        except (json.JSONDecodeError, IOError):
-            return True
-    
-    return False
 
 
 def _load_jsonc(path: str) -> dict | None:
@@ -122,6 +76,70 @@ def _load_jsonc(path: str) -> dict | None:
         return data if isinstance(data, dict) else None
     except Exception:
         return None
+
+
+def _resolve_setup_workspace() -> str:
+    workspace_root = os.environ.get("WORKSPACE_ROOT", "").strip()
+    if not workspace_root:
+        raise ValueError(
+            "WORKSPACE_ROOT is not set. Open a VS Code workspace, add the "
+            "WORKSPACE_ROOT terminal environment setting, and open a new terminal."
+        )
+
+    workspace_root = os.path.realpath(os.path.expanduser(workspace_root))
+    if not os.path.isdir(workspace_root):
+        raise ValueError(
+            f"WORKSPACE_ROOT is not an existing directory: {workspace_root}"
+        )
+
+    current_dir = os.path.realpath(os.getcwd())
+    try:
+        common_dir = os.path.commonpath((workspace_root, current_dir))
+    except ValueError as exc:
+        raise ValueError(
+            "The current directory is outside the open VS Code workspace."
+        ) from exc
+    if os.path.normcase(common_dir) != os.path.normcase(workspace_root):
+        raise ValueError(
+            "The current directory is outside the open VS Code workspace."
+        )
+
+    search_dir = current_dir
+    while True:
+        candidate = os.path.join(search_dir, ".vscode")
+        if os.path.isdir(candidate):
+            return candidate
+        if os.path.normcase(search_dir) == os.path.normcase(workspace_root):
+            break
+        search_dir = os.path.dirname(search_dir)
+
+    return os.path.join(workspace_root, ".vscode")
+
+
+def _is_path_within(path: str, root: str) -> bool:
+    try:
+        return os.path.commonpath((path, root)) == root
+    except ValueError:
+        return False
+
+
+def _is_replx_typehint_path(path: str, builtin_root: str, package_root: str) -> bool:
+    normalized = os.path.normcase(os.path.realpath(os.path.expanduser(path)))
+    normalized_builtin_root = os.path.normcase(os.path.realpath(builtin_root))
+    if _is_path_within(normalized, normalized_builtin_root):
+        return normalized != normalized_builtin_root
+
+    normalized_package_root = os.path.normcase(os.path.realpath(package_root))
+    if not _is_path_within(normalized, normalized_package_root):
+        return False
+
+    relative = os.path.relpath(normalized, normalized_package_root)
+    parts = relative.split(os.sep)
+    return (
+        len(parts) == 3
+        and parts[0] in ("core", "device")
+        and parts[2] == "typehints"
+    )
 
 
 def _get_portable_vscode_root_from_pshome() -> str | None:
@@ -242,29 +260,66 @@ def _create_vscode_files_and_typehints(
         if os.path.isdir(core_lib_typehints):
             extra_paths.append(core_lib_typehints)
     
-    if device:
-        device_path = device_name_to_path(device)
+    package_device = resolve_package_device(core, device, manufacturer)
+    if package_device:
+        device_path = device_name_to_path(package_device)
         device_builtin = StoreManager.device_typehints_path(device_path)
         if device_builtin and os.path.isdir(device_builtin):
             extra_paths.append(device_builtin)
     
-    if device:
-        package_device = resolve_package_device(core, device, manufacturer)
+    if package_device:
         device_path = device_name_to_path(package_device)
         device_typehints = os.path.join(StoreManager.pkg_root(), "device", device_path, "typehints")
         if os.path.isdir(device_typehints):
             extra_paths.append(device_typehints)
-    
-    settings_dict = {
-        "python.languageServer": "Pylance",
-        "python.analysis.diagnosticSeverityOverrides": {
-            "reportMissingModuleSource": "none"
-        },
-        "python.analysis.extraPaths": extra_paths
-    }
 
+    package_root = StoreManager.pkg_root()
+    builtin_root = StoreManager.builtin_typehints_root()
+    if os.path.exists(settings_file):
+        settings_dict = _load_jsonc(settings_file)
+        if settings_dict is None:
+            raise ValueError(f"Could not parse VS Code settings: {settings_file}")
+    else:
+        settings_dict = {}
+
+    settings_dict.setdefault("python.languageServer", "Pylance")
+    settings_dict.setdefault(
+        "python.analysis.diagnosticSeverityOverrides",
+        {"reportMissingModuleSource": "none"},
+    )
+
+    existing_extra_paths = settings_dict.get("python.analysis.extraPaths", [])
+    if not isinstance(existing_extra_paths, list) or not all(
+        isinstance(path, str) for path in existing_extra_paths
+    ):
+        raise ValueError(
+            '"python.analysis.extraPaths" in VS Code settings must be a list of paths.'
+        )
+
+    merged_extra_paths = [
+        path for path in existing_extra_paths
+        if not _is_replx_typehint_path(path, builtin_root, package_root)
+    ]
+    for path in extra_paths:
+        normalized_path = os.path.normcase(os.path.realpath(path))
+        if not any(
+            os.path.normcase(os.path.realpath(existing)) == normalized_path
+            for existing in merged_extra_paths
+        ):
+            merged_extra_paths.append(path)
+    settings_dict["python.analysis.extraPaths"] = merged_extra_paths
+
+    existing_stub_path = settings_dict.get("python.analysis.stubPath")
+    stub_path_is_managed = (
+        isinstance(existing_stub_path, str)
+        and _is_replx_typehint_path(existing_stub_path, builtin_root, package_root)
+    )
     if comm_path and os.path.isdir(comm_path):
-        settings_dict["python.analysis.stubPath"] = comm_path
+        if existing_stub_path is None or stub_path_is_managed:
+            settings_dict["python.analysis.stubPath"] = comm_path
+    elif stub_path_is_managed:
+        settings_dict.pop("python.analysis.stubPath")
+
     settings_file_contents = json.dumps(settings_dict, indent=4) + "\n"
     
     launch_file_contents = """{
@@ -284,9 +339,8 @@ def _create_vscode_files_and_typehints(
     if overwrite or not os.path.exists(task_file):
         with open(task_file, "w", encoding="utf-8") as f:
             f.write(task_file_contents)
-    if overwrite or not os.path.exists(settings_file):
-        with open(settings_file, "w", encoding="utf-8") as f:
-            f.write(settings_file_contents)
+    with open(settings_file, "w", encoding="utf-8") as f:
+        f.write(settings_file_contents)
     if overwrite or not os.path.exists(launch_file):
         with open(launch_file, "w", encoding="utf-8") as f:
             f.write(launch_file_contents)
@@ -296,7 +350,9 @@ def _create_vscode_files_and_typehints(
 
 @app.command(rich_help_panel="Connection & Session")
 def setup(
-    clean: bool = typer.Option(False, "--clean", help="Delete .vscode folder in current project"),
+    clean: bool = typer.Option(
+        False, "--clean", help="Delete .vscode folder in the current workspace"
+    ),
     theme: str = typer.Option(
         None,
         "--theme",
@@ -324,8 +380,13 @@ Run this once per project folder to set up your workspace.
   replx [yellow]PORT[/yellow] setup                       [dim]# Serial: COM3, /dev/ttyUSB0, /dev/serial/by-id/...[/dim]
   replx setup [yellow]--clean[/yellow]                    [dim]# Delete .vscode folder (no PORT needed)[/dim]
 
+[bold cyan]Workspace root:[/bold cyan]
+  Requires [yellow]WORKSPACE_ROOT[/yellow] from the VS Code integrated terminal.
+  Configure it as [dim]"${workspaceFolder}"[/dim] in terminal.integrated.env.windows/osx/linux,
+  then open a new integrated terminal. Setup searches only up to that workspace root.
+
 [bold cyan]Options:[/bold cyan]
-  [yellow]--clean[/yellow]   Delete the [yellow].vscode[/yellow] folder in the current project directory.
+  [yellow]--clean[/yellow]   Delete the nearest [yellow].vscode[/yellow] folder in this workspace.
             All configuration and typehints will be removed.
   [yellow]--theme[/yellow]   UI theme preset. If omitted, try VSCode theme auto-detect, fallback [yellow]dark[/yellow].
             Supported: [dim]dark, white, one-dark-pro, atom-one-light, github-dark, github-light[/dim]
@@ -356,6 +417,18 @@ Run this once per project folder to set up your workspace.
         OutputHelper.print_panel(help_text, title="setup", border_style="help")
         console.print()
         raise typer.Exit()
+
+    try:
+        vscode_dir = _resolve_setup_workspace()
+    except ValueError as e:
+        OutputHelper.print_panel(
+            str(e),
+            title="VS Code Workspace Required",
+            border_style="error",
+        )
+        raise typer.Exit(1)
+
+    env_path = os.path.join(vscode_dir, ".replx")
 
     selected_theme = 'dark'
     display_theme = 'one-dark-pro'
@@ -394,22 +467,7 @@ Run this once per project folder to set up your workspace.
             )
             raise typer.Exit(1)
         import shutil
-        current = os.path.realpath(os.getcwd())
-        root = os.path.abspath(os.sep)
-        vscode_dir = None
-        search_dir = current
-        visited = set()
-        while search_dir not in visited:
-            visited.add(search_dir)
-            candidate = os.path.join(search_dir, ".vscode")
-            if os.path.isdir(candidate):
-                vscode_dir = candidate
-                break
-            parent = os.path.dirname(search_dir)
-            if parent == search_dir or parent == root:
-                break
-            search_dir = parent
-        if vscode_dir:
+        if os.path.isdir(vscode_dir):
             shutil.rmtree(vscode_dir)
             OutputHelper.print_panel(
                 "All settings have been removed.",
@@ -440,7 +498,6 @@ Run this once per project folder to set up your workspace.
         )
         raise typer.Exit(1)
     
-    env_path = _find_env_file()
     # V2 uses the configured TCP endpoint directly. If it is unavailable,
     # start_agent below performs the only required availability check.
     agent_port = _find_available_agent_port(env_path, probe=False)
@@ -475,8 +532,7 @@ Run this once per project folder to set up your workspace.
                     version = status.get('version', '?')
                     manufacturer = status.get('manufacturer', '')
                     
-                    vscode_dir = _find_or_create_vscode_dir()
-                    env_path = os.path.join(vscode_dir, ".replx")
+                    os.makedirs(vscode_dir, exist_ok=True)
                     workspace = os.path.dirname(vscode_dir)
                     
                     _update_connection_config(
@@ -545,8 +601,7 @@ Run this once per project folder to set up your workspace.
                         STATE.version = result.get('version', '?')
                         STATE.manufacturer = result.get('manufacturer', '')
                         
-                        vscode_dir = _find_or_create_vscode_dir()
-                        env_path = os.path.join(vscode_dir, ".replx")
+                        os.makedirs(vscode_dir, exist_ok=True)
                         
                         _update_connection_config(
                             env_path, port,
@@ -634,38 +689,8 @@ Run this once per project folder to set up your workspace.
         )
         raise typer.Exit(1)
 
-    vscode_dir = _find_or_create_vscode_dir()
-    env_path = os.path.join(vscode_dir, ".replx")
-    
-    need_recreate = False
-    if os.path.exists(env_path):
-        existing_data = _read_env_ini(env_path)
-        existing_default = existing_data.get('default')
-        if existing_default:
-            existing_config = existing_data['connections'].get(existing_default, {})
-            existing_core = existing_config.get('core', '')
-            existing_device = existing_config.get('device', '')
-            
-            if existing_core and existing_device:
-                if existing_core != STATE.core or existing_device != STATE.device:
-                    need_recreate = True
-    
-    if not need_recreate and os.path.isdir(vscode_dir):
-        if _check_vscode_version(vscode_dir):
-            need_recreate = True
-    
-    if need_recreate:
-        import shutil
-        for item in os.listdir(vscode_dir):
-            item_path = os.path.join(vscode_dir, item)
-            try:
-                if os.path.isdir(item_path):
-                    shutil.rmtree(item_path)
-                else:
-                    os.remove(item_path)
-            except Exception:
-                pass
-    
+    os.makedirs(vscode_dir, exist_ok=True)
+
     set_as_default = True
     
     _update_connection_config(
@@ -681,7 +706,7 @@ Run this once per project folder to set up your workspace.
     )
     
     typehint_paths = _create_vscode_files_and_typehints(
-        vscode_dir, STATE.core, STATE.device, overwrite=True,
+        vscode_dir, STATE.core, STATE.device,
         manufacturer=STATE.manufacturer
     )
     
